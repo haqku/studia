@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import os
 import json
 import re
+import hashlib
 from datetime import datetime, timedelta
 
 # --- KONFIGURACJA ---
@@ -34,22 +35,19 @@ def clean_val(val):
     try:
         v = str(val).replace('.0', '').replace(',', '.').strip()
         return int(float(v))
-    except:
-        return None
+    except: return None
 
 def main():
-    print("🚀 START: Inteligentne parsowanie MECH II...")
+    print("🚀 START...")
     r = requests.get(URL_STRONY)
     soup = BeautifulSoup(r.text, 'html.parser')
     plan_url = next((a['href'] for a in soup.find_all('a', href=True) if "niestacjonarne" in a.text.lower() and a['href'].endswith('.xlsx')), None)
-    
     if not plan_url: return
     
     resp = requests.get(plan_url)
     with open("temp.xlsx", "wb") as f: f.write(resp.content)
     df = pd.read_excel("temp.xlsx", header=None)
 
-    # 1. Znajdź daty
     all_blocks = []
     for col in range(len(df.columns)):
         for row in range(2):
@@ -58,7 +56,6 @@ def main():
                 all_blocks.append({"date": d, "col_start": col})
                 break
 
-    # 2. Znajdź kolumny grupy
     mech_cols = []
     for r in range(5):
         for c in range(len(df.columns)):
@@ -69,39 +66,33 @@ def main():
     for i, block in enumerate(all_blocks):
         start = block["col_start"]
         end = all_blocks[i+1]["col_start"] if i+1 < len(all_blocks) else len(df.columns)
-        
-        # Znajdź kolumnę grupy w tym bloku
         target_col = next((c for c in mech_cols if start <= c < end), None)
         if target_col is None: continue
 
-        # --- DYNAMICZNE SZUKANIE KOLUMNY GODZINY I MINUTY ---
-        h_col, m_col = None, None
+        h_col = None
         for c in range(start - 5, start + 5):
             if c < 0 or c >= len(df.columns): continue
-            # Sprawdź czy kolumna zawiera godziny (8, 9, 10...)
             sample = [clean_val(x) for x in df.iloc[4:15, c] if pd.notna(x)]
             if any(v is not None and 8 <= v <= 21 for v in sample):
                 h_col = c
-                m_col = c + 1 # Minuty są zawsze obok
                 break
-        
         if h_col is None: continue
+        m_col = h_col + 1
 
         current_ev = None
         for row in range(4, len(df)):
             subject = str(df.iloc[row, target_col]).strip()
             h = clean_val(df.iloc[row, h_col])
             m = clean_val(df.iloc[row, m_col])
-
             if subject != "nan" and subject != "" and subject != GRUPA:
                 if h is not None and m is not None:
                     try:
                         start_dt = block["date"].replace(hour=h, minute=m)
                         if current_ev and current_ev['title'] == subject:
-                            current_ev['end'] = start_dt + timedelta(minutes=15)
+                            current_ev['end'] = start_dt + timedelta(minutes=45)
                         else:
                             if current_ev: events.append(current_ev)
-                            current_ev = {'title': subject, 'start': start_dt, 'end': start_dt + timedelta(minutes=15)}
+                            current_ev = {'title': subject, 'start': start_dt, 'end': start_dt + timedelta(minutes=45)}
                     except: continue
             else:
                 if current_ev:
@@ -109,26 +100,37 @@ def main():
                     current_ev = None
         if current_ev: events.append(current_ev)
 
-    print(f"✅ Sukces: Wyłuskano {len(events)} wydarzeń!")
+    print(f"✅ Wyłuskano {len(events)} zajęć.")
 
-    # 3. Zapis i Kalendarz
-    ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//MECHII", "X-WR-CALNAME:Plan MECH II", "METHOD:PUBLISH"]
+    # GENEROWANIE ICS Z UID
+    stamp = datetime.now().strftime('%Y%m%dT%H%M%SZ')
+    ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//MECHII", "X-WR-CALNAME:Plan MECH II", "X-WR-TIMEZONE:Europe/Warsaw", "METHOD:PUBLISH"]
+    
     for e in events:
-        ics.extend(["BEGIN:VEVENT", f"DTSTART:{e['start'].strftime('%Y%m%dT%H%M%S')}", f"DTEND:{e['end'].strftime('%Y%m%dT%H%M%S')}", f"SUMMARY:{e['title']}", "END:VEVENT"])
+        uid = hashlib.md5(f"{e['title']}{e['start']}".encode()).hexdigest()
+        ics.extend([
+            "BEGIN:VEVENT",
+            f"UID:{uid}@uczelnia",
+            f"DTSTAMP:{stamp}",
+            f"DTSTART:{e['start'].strftime('%Y%m%dT%H%M%S')}",
+            f"DTEND:{e['end'].strftime('%Y%m%dT%H%M%S')}",
+            f"SUMMARY:{e['title']}",
+            "END:VEVENT"
+        ])
     ics.append("END:VCALENDAR")
     
-    with open(ICS_FILE, "w", encoding="utf-8") as f: f.write("\n".join(ics))
+    with open(ICS_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(ics))
 
-    # 4. Telegram
-    if len(events) > 0:
-        titles = [f"{e['title']} {e['start']}" for e in events]
-        old_titles = []
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r") as f: old_titles = json.load(f)
-        
-        if titles != old_titles:
-            with open(STATE_FILE, "w") as f: json.dump(titles, f)
-            send_msg(f"✅ *PLAN MECH II GOTOWY!*\n\nZnaleziono {len(events)} zajęć. Twój iPhone/Mac powinien już widzieć daty!")
+    # Logika Telegrama (tylko jak są zmiany)
+    titles = [f"{e['title']} {e['start']}" for e in events]
+    old_titles = []
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f: old_titles = json.load(f)
+    
+    if titles != old_titles:
+        with open(STATE_FILE, "w") as f: json.dump(titles, f)
+        send_msg(f"✅ *Plan MECH II zsynchronizowany!* ({len(events)} zajęć)")
 
 if __name__ == "__main__":
     main()
