@@ -1,0 +1,29 @@
+name: Sprawdzanie Planu
+on:
+  schedule:
+    - cron: '0 */4 * * *' # Co 4 godziny
+  workflow_dispatch:      # Pozwala odpalić ręcznie
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Python Setup
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Libs
+        run: pip install pandas requests beautifulsoup4 openpyxl
+      - name: Run
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python monitor.py
+      - name: Save State
+        run: |
+          git config --global user.name 'PlanBot'
+          git config --global user.email 'bot@github.com'
+          git add last_hash.txt
+          git commit -m "Aktualizacja stanu planu" || exit 0
+          git push
