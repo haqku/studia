@@ -1,7 +1,7 @@
 name: Sprawdzanie Planu
 on:
   schedule:
-    - cron: '0 */4 * * *' # Co 4 godziny
+    - cron: '0 */1 * * *' # Co 4 godziny
   workflow_dispatch:      # Pozwala odpalić ręcznie
 
 jobs:
