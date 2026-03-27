@@ -37,6 +37,24 @@ def clean_val(val):
         return int(float(v))
     except: return None
 
+def format_report(event_list, emoji):
+    if not event_list: return ""
+    # Sortowanie chronologiczne
+    event_list.sort(key=lambda x: datetime.strptime(x.split(" - ")[0], "%d.%m %H:%M"))
+    
+    report = ""
+    last_date = ""
+    for ev in event_list:
+        date_part, title = ev.split(" - ", 1)
+        day_month, hour = date_part.split(" ")
+        
+        if day_month != last_date:
+            report += f"\n📅 *{day_month}*\n"
+            last_date = day_month
+        
+        report += f"  {emoji} {hour}: {title}\n"
+    return report
+
 def main():
     r = requests.get(URL_STRONY)
     soup = BeautifulSoup(r.text, 'html.parser')
@@ -47,7 +65,6 @@ def main():
     with open("temp.xlsx", "wb") as f: f.write(resp.content)
     df = pd.read_excel("temp.xlsx", header=None)
 
-    # 1. Szukanie dat i grupy
     all_blocks = []
     for col in range(len(df.columns)):
         for row in range(2):
@@ -62,7 +79,6 @@ def main():
             if GRUPA in str(df.iloc[r, c]).upper():
                 mech_cols.append(c)
 
-    # 2. Wyciąganie zajęć
     current_events = []
     for i, block in enumerate(all_blocks):
         start = block["col_start"]
@@ -88,54 +104,36 @@ def main():
                 if h is not None and m is not None:
                     try:
                         dt = block["date"].replace(hour=h, minute=m)
-                        # Tworzymy unikalny klucz dla każdego zajęcia
-                        event_key = f"{dt.strftime('%d.%m %H:%M')} - {subject}"
-                        current_events.append(event_key)
+                        current_events.append(f"{dt.strftime('%d.%m %H:%M')} - {subject}")
                     except: continue
 
-    # 3. Porównywanie zmian
+    # ICS Generation
+    stamp = datetime.now().strftime('%Y%m%dT%H%M%SZ')
+    ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//MECHII//PL", "X-WR-CALNAME:Plan MECH II", "METHOD:PUBLISH"]
+    for e_str in current_events:
+        parts = e_str.split(" - ")
+        dt = datetime.strptime(f"{parts[0]} {datetime.now().year}", "%d.%m %H:%M %Y")
+        uid = hashlib.md5(e_str.encode()).hexdigest()
+        ics.extend(["BEGIN:VEVENT", f"UID:{uid}@studia.bot", f"DTSTAMP:{stamp}", f"DTSTART:{dt.strftime('%Y%m%dT%H%M%S')}", f"DTEND:{(dt + timedelta(minutes=45)).strftime('%Y%m%dT%H%M%S')}", f"SUMMARY:{parts[1]}", "END:VEVENT"])
+    ics.append("END:VCALENDAR")
+    with open(ICS_FILE, "w", encoding="utf-8") as f: f.write("\r\n".join(ics))
+
+    # Telegram reporting
     old_events = []
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding='utf-8') as f:
-            old_events = json.load(f)
+        with open(STATE_FILE, "r", encoding='utf-8') as f: old_events = json.load(f)
 
     added = [e for e in current_events if e not in old_events]
     removed = [e for e in old_events if e not in current_events]
 
-    # 4. Generowanie pliku ICS (Standard Apple)
-    stamp = datetime.now().strftime('%Y%m%dT%H%M%SZ')
-    ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//MECHII//PL", "X-WR-CALNAME:Plan MECH II", "METHOD:PUBLISH", "REFRESH-INTERVAL;VALUE=DURATION:PT1H"]
-    
-    for e_str in current_events:
-        # Parsowanie klucza z powrotem na dane do ICS
-        parts = e_str.split(" - ")
-        time_str, title = parts[0], parts[1]
-        dt = datetime.strptime(f"{time_str} {datetime.now().year}", "%d.%m %H:%M %Y")
-        uid = hashlib.md5(e_str.encode()).hexdigest()
-        
-        ics.extend([
-            "BEGIN:VEVENT",
-            f"UID:{uid}@studia.bot",
-            f"DTSTAMP:{stamp}",
-            f"DTSTART:{dt.strftime('%Y%m%dT%H%M%S')}",
-            f"DTEND:{(dt + timedelta(minutes=45)).strftime('%Y%m%dT%H%M%S')}",
-            f"SUMMARY:{title}",
-            "END:VEVENT"
-        ])
-    ics.append("END:VCALENDAR")
-    
-    with open(ICS_FILE, "w", encoding="utf-8") as f:
-        f.write("\r\n".join(ics))
-
-    # 5. Raport na Telegram
     if added or removed:
-        msg = "🚨 *WYKRYTO ZMIANY W PLANIE MECH II!*\n\n"
+        msg = "🚨 *ZMIANY W HARMONOGRAMIE MECH II*\n"
         if added:
-            msg += "✅ *NOWE ZAJĘCIA:*\n" + "\n".join([f"• {a}" for a in added[:15]]) + "\n\n"
+            msg += "\n✅ *NOWE ZAJĘCIA:*" + format_report(added, "🔹")
         if removed:
-            msg += "❌ *USUNIĘTO/PRZENIESIONO:*\n" + "\n".join([f"• {r}" for r in removed[:15]]) + "\n\n"
+            msg += "\n❌ *USUNIĘTE/STARE:*" + format_report(removed, "🔸")
         
-        msg += f"🔗 [Pobierz nowy plan]({plan_url})"
+        msg += f"\n🔗 [Link do pełnego Excela]({plan_url})"
         send_msg(msg)
         
         with open(STATE_FILE, "w", encoding='utf-8') as f:
