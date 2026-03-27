@@ -38,7 +38,6 @@ def clean_val(val):
     except: return None
 
 def main():
-    print("🚀 START...")
     r = requests.get(URL_STRONY)
     soup = BeautifulSoup(r.text, 'html.parser')
     plan_url = next((a['href'] for a in soup.find_all('a', href=True) if "niestacjonarne" in a.text.lower() and a['href'].endswith('.xlsx')), None)
@@ -48,6 +47,7 @@ def main():
     with open("temp.xlsx", "wb") as f: f.write(resp.content)
     df = pd.read_excel("temp.xlsx", header=None)
 
+    # 1. Szukanie dat i grupy
     all_blocks = []
     for col in range(len(df.columns)):
         for row in range(2):
@@ -62,7 +62,8 @@ def main():
             if GRUPA in str(df.iloc[r, c]).upper():
                 mech_cols.append(c)
 
-    events = []
+    # 2. Wyciąganie zajęć
+    current_events = []
     for i, block in enumerate(all_blocks):
         start = block["col_start"]
         end = all_blocks[i+1]["col_start"] if i+1 < len(all_blocks) else len(df.columns)
@@ -79,7 +80,6 @@ def main():
         if h_col is None: continue
         m_col = h_col + 1
 
-        current_ev = None
         for row in range(4, len(df)):
             subject = str(df.iloc[row, target_col]).strip()
             h = clean_val(df.iloc[row, h_col])
@@ -87,50 +87,59 @@ def main():
             if subject != "nan" and subject != "" and subject != GRUPA:
                 if h is not None and m is not None:
                     try:
-                        start_dt = block["date"].replace(hour=h, minute=m)
-                        if current_ev and current_ev['title'] == subject:
-                            current_ev['end'] = start_dt + timedelta(minutes=45)
-                        else:
-                            if current_ev: events.append(current_ev)
-                            current_ev = {'title': subject, 'start': start_dt, 'end': start_dt + timedelta(minutes=45)}
+                        dt = block["date"].replace(hour=h, minute=m)
+                        # Tworzymy unikalny klucz dla każdego zajęcia
+                        event_key = f"{dt.strftime('%d.%m %H:%M')} - {subject}"
+                        current_events.append(event_key)
                     except: continue
-            else:
-                if current_ev:
-                    events.append(current_ev)
-                    current_ev = None
-        if current_ev: events.append(current_ev)
 
-    print(f"✅ Wyłuskano {len(events)} zajęć.")
+    # 3. Porównywanie zmian
+    old_events = []
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r", encoding='utf-8') as f:
+            old_events = json.load(f)
 
-    # GENEROWANIE ICS Z UID
+    added = [e for e in current_events if e not in old_events]
+    removed = [e for e in old_events if e not in current_events]
+
+    # 4. Generowanie pliku ICS (Standard Apple)
     stamp = datetime.now().strftime('%Y%m%dT%H%M%SZ')
-    ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//MECHII", "X-WR-CALNAME:Plan MECH II", "X-WR-TIMEZONE:Europe/Warsaw", "METHOD:PUBLISH"]
+    ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//MECHII//PL", "X-WR-CALNAME:Plan MECH II", "METHOD:PUBLISH", "REFRESH-INTERVAL;VALUE=DURATION:PT1H"]
     
-    for e in events:
-        uid = hashlib.md5(f"{e['title']}{e['start']}".encode()).hexdigest()
+    for e_str in current_events:
+        # Parsowanie klucza z powrotem na dane do ICS
+        parts = e_str.split(" - ")
+        time_str, title = parts[0], parts[1]
+        dt = datetime.strptime(f"{time_str} {datetime.now().year}", "%d.%m %H:%M %Y")
+        uid = hashlib.md5(e_str.encode()).hexdigest()
+        
         ics.extend([
             "BEGIN:VEVENT",
-            f"UID:{uid}@uczelnia",
+            f"UID:{uid}@studia.bot",
             f"DTSTAMP:{stamp}",
-            f"DTSTART:{e['start'].strftime('%Y%m%dT%H%M%S')}",
-            f"DTEND:{e['end'].strftime('%Y%m%dT%H%M%S')}",
-            f"SUMMARY:{e['title']}",
+            f"DTSTART:{dt.strftime('%Y%m%dT%H%M%S')}",
+            f"DTEND:{(dt + timedelta(minutes=45)).strftime('%Y%m%dT%H%M%S')}",
+            f"SUMMARY:{title}",
             "END:VEVENT"
         ])
     ics.append("END:VCALENDAR")
     
     with open(ICS_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(ics))
+        f.write("\r\n".join(ics))
 
-    # Logika Telegrama (tylko jak są zmiany)
-    titles = [f"{e['title']} {e['start']}" for e in events]
-    old_titles = []
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f: old_titles = json.load(f)
-    
-    if titles != old_titles:
-        with open(STATE_FILE, "w") as f: json.dump(titles, f)
-        send_msg(f"✅ *Plan MECH II zsynchronizowany!* ({len(events)} zajęć)")
+    # 5. Raport na Telegram
+    if added or removed:
+        msg = "🚨 *WYKRYTO ZMIANY W PLANIE MECH II!*\n\n"
+        if added:
+            msg += "✅ *NOWE ZAJĘCIA:*\n" + "\n".join([f"• {a}" for a in added[:15]]) + "\n\n"
+        if removed:
+            msg += "❌ *USUNIĘTO/PRZENIESIONO:*\n" + "\n".join([f"• {r}" for r in removed[:15]]) + "\n\n"
+        
+        msg += f"🔗 [Pobierz nowy plan]({plan_url})"
+        send_msg(msg)
+        
+        with open(STATE_FILE, "w", encoding='utf-8') as f:
+            json.dump(current_events, f, ensure_ascii=False)
 
 if __name__ == "__main__":
     main()
