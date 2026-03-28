@@ -1,21 +1,21 @@
 name: Monitor Harmonogramu
 on:
   schedule:
-    - cron: '0 */4 * * *' # Sprawdzaj co 4 godziny
-  workflow_dispatch:      # Pozwala odpalić ręcznie
+    - cron: '0 */1 * * *'
+  workflow_dispatch:
 
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
     permissions:
-      contents: write     # Dodatkowe zabezpieczenie uprawnień
+      contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4  # Zaktualizowane do v4
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # Zaktualizowane do v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: pip install pandas openpyxl requests beautifulsoup4
@@ -26,10 +26,10 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python monitor.py
 
-      - name: Commit and Push changes
+      - name: Commit and Push
         run: |
           git config --global user.name 'PlanBot'
           git config --global user.email 'bot@github.com'
-          git add plan_state.json studia.ics last_hash.txt || true
-          git commit -m "Automatyczna aktualizacja planu i kalendarza" || exit 0
+          git add plan_state.json studia.ics || true
+          git commit -m "Aktualizacja planu" || exit 0
           git push
