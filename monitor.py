@@ -55,54 +55,64 @@ def main():
     wb = openpyxl.load_workbook("temp.xlsx", data_only=True)
     ws = wb.active
 
-    # 1. Szukamy wszystkich kolumn MECH II
-    mech_cols = []
+    # 1. Mapowanie struktury
+    all_blocks = []
+    for c in range(1, ws.max_column + 1):
+        for r in range(1, 4):
+            d = parse_date(get_val(ws, r, c))
+            if d:
+                all_blocks.append({"date": d, "col": c})
+                break
+    
+    mech_cols_global = []
     for c in range(1, ws.max_column + 1):
         for r in range(1, 6):
             if GRUPA in str(get_val(ws, r, c)).upper():
-                mech_cols.append(c)
+                mech_cols_global.append(c)
                 break
 
     all_slots = []
-    for c_idx in mech_cols:
-        # Dla każdej kolumny grupy szukamy daty (lewo/góra)
-        current_date = None
-        for back_c in range(c_idx, max(1, c_idx-15), -1):
-            for r in range(1, 4):
-                current_date = parse_date(get_val(ws, r, back_c))
-                if current_date: break
-            if current_date: break
+    for i, block in enumerate(all_blocks):
+        c_start = block["col"]
+        c_end = all_blocks[i+1]["col"] if i+1 < len(all_blocks) else ws.max_column + 1
+        target_cols = [c for c in mech_cols_global if c_start <= c < c_end]
         
-        if not current_date: continue
-
-        # Szukamy kolumny godzin (zazwyczaj blisko daty, kolumny 1-3 w bloku)
+        # SZUKANIE GODZINY - Skanujemy cały blok dnia (pierwsze 5 kolumn bloku)
         h_col = None
-        for test_c in range(max(1, c_idx-10), c_idx):
-            v = str(ws.cell(row=6, column=test_c).value).replace('.0','')
-            if v.isdigit() and 7 <= int(v) <= 20:
-                h_col = test_c
-                break
+        for test_c in range(c_start, c_start + 10):
+            # Sprawdzamy wiersze 6-12 czy mają liczby godzinowe
+            for test_r in range(6, 15):
+                val = str(ws.cell(row=test_r, column=test_c).value).replace('.0','').strip()
+                if val.isdigit() and 7 <= int(val) <= 21:
+                    h_col = test_c
+                    break
+            if h_col: break
         
         if not h_col: continue
 
         for row in range(5, ws.max_row + 1):
             try:
-                cell = ws.cell(row=row, column=c_idx)
-                val = str(cell.value).strip()
-                if not val or val.lower() == "nan" or GRUPA in val.upper(): continue
+                h_val = ws.cell(row=row, column=h_col).value
+                m_val = ws.cell(row=row, column=h_col+1).value
+                if h_val is None or m_val is None: continue
                 
-                h = int(float(str(ws.cell(row=row, column=h_col).value)))
-                m = int(float(str(ws.cell(row=row, column=h_col+1).value)))
+                h = int(float(str(h_val)))
+                m = int(float(str(m_val)))
+                time_dt = block["date"].replace(hour=h, minute=m)
                 
-                subject = " ".join(val.split())
-                if is_red(cell): subject = f"🔴 [ZDALNIE] {subject}"
-                
-                all_slots.append({'start': current_date.replace(hour=h, minute=m), 'title': subject, 'col': c_idx})
+                for t_c in target_cols:
+                    cell = ws.cell(row=row, column=t_c)
+                    val = str(cell.value).strip()
+                    if not val or val.lower() == "nan" or GRUPA in val.upper(): continue
+                    
+                    clean_val = " ".join(val.split())
+                    if is_red(cell): clean_val = f"🔴 [ZDALNIE] {clean_val}"
+                    all_slots.append({'start': time_dt, 'title': clean_val, 'col': t_c})
             except: continue
 
-    # 2. Łączenie slotów (45 min -> długie bloki)
+    # 2. Łączenie slotów
     all_slots.sort(key=lambda x: (x['col'], x['start']))
-    merged = []
+    merged_events = []
     if all_slots:
         curr = all_slots[0].copy()
         curr['end'] = curr['start'] + timedelta(minutes=45)
@@ -110,35 +120,34 @@ def main():
             if nxt['title'] == curr['title'] and nxt['col'] == curr['col'] and nxt['start'] == curr['end']:
                 curr['end'] = nxt['start'] + timedelta(minutes=45)
             else:
-                merged.append(curr)
+                merged_events.append(curr)
                 curr = nxt.copy()
                 curr['end'] = curr['start'] + timedelta(minutes=45)
-        merged.append(curr)
+        merged_events.append(curr)
 
-    # 3. Generowanie ICS
+    # 3. Zapis i Raport
     ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//MECHII", "X-WR-CALNAME:Plan MECH II", "METHOD:PUBLISH"]
-    for e in merged:
+    for e in merged_events:
         uid = hashlib.md5(f"{e['title']}{e['start']}{e['col']}".encode()).hexdigest()
         ics.extend(["BEGIN:VEVENT", f"UID:{uid}@studia.pl", f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
                     f"DTSTART:{e['start'].strftime('%Y%m%dT%H%M%S')}", f"DTEND:{e['end'].strftime('%Y%m%dT%H%M%S')}",
                     f"SUMMARY:{e['title']}", "END:VEVENT"])
     ics.append("END:VCALENDAR")
-    
-    with open(ICS_FILE, "w", encoding="utf-8") as f:
-        f.write("\r\n".join(ics))
+    with open(ICS_FILE, "w", encoding="utf-8") as f: f.write("\r\n".join(ics))
 
-    # 4. Telegram
-    merged.sort(key=lambda x: x['start'])
-    report = "🚨 *PEŁNY PLAN MECH II*\n"
-    last_d = ""
-    for e in merged:
-        d_str = e['start'].strftime("%d.%m")
-        if d_str != last_d:
-            report += f"\n📅 *{d_str}*\n"
-            last_d = d_str
-        report += f"  • {e['start'].strftime('%H:%M')}-{e['end'].strftime('%H:%M')}: {e['title']}\n"
-    
-    send_msg(report if merged else "⚠️ Nie znaleziono zajęć mimo znalezienia kolumn.")
+    if merged_events:
+        merged_events.sort(key=lambda x: x['start'])
+        report = f"✅ *ZNALAZŁEM {len(merged_events)} ZAJĘĆ DLA MECH II*\n"
+        last_d = ""
+        for e in merged_events:
+            d_str = e['start'].strftime("%d.%m")
+            if d_str != last_d:
+                report += f"\n📅 *{d_str}*\n"
+                last_d = d_str
+            report += f"  • {e['start'].strftime('%H:%M')}-{e['end'].strftime('%H:%M')}: {e['title']}\n"
+        send_msg(report)
+    else:
+        send_msg("❌ Dalej nie widzę zajęć. Problem z odczytem godzin w wierszach.")
 
 if __name__ == "__main__":
     main()
