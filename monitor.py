@@ -23,18 +23,12 @@ def send_msg(text):
     requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"})
 
 def parse_date(date_str):
-    if not isinstance(date_str, str): return None
-    match = re.search(r"(\d+)\s+([a-zA-Z]+)", date_str)
+    match = re.search(r"(\d+)\s+([a-zA-Z]+)", str(date_str))
     if match:
         day = int(match.group(1))
         month = PL_MONTHS.get(match.group(2).lower())
         if month: return datetime(2026, month, day)
     return None
-
-def clean_text(text):
-    # Usuwa entery i nadmiarowe spacje, które psują plik kalendarza
-    if not text or text == "nan": return ""
-    return " ".join(str(text).split())
 
 def main():
     r = requests.get(URL_STRONY)
@@ -49,10 +43,8 @@ def main():
     all_blocks = []
     for col in range(len(df.columns)):
         for row in range(3):
-            d = parse_date(str(df.iloc[row, col]))
-            if d:
-                all_blocks.append({"date": d, "col_start": col})
-                break
+            d = parse_date(df.iloc[row, col])
+            if d: all_blocks.append({"date": d, "col_start": col})
 
     mech_cols = [c for c in range(len(df.columns)) if GRUPA in str(df.iloc[2, c]).upper() or GRUPA in str(df.iloc[3, c]).upper()]
 
@@ -63,67 +55,62 @@ def main():
         target_col = next((c for c in mech_cols if start <= c < end), None)
         if target_col is None: continue
 
+        # Szukanie kolumny godzin (musi zawierać cyfry)
         h_col = None
         for c in range(start - 2, start + 2):
             if c < 0: continue
-            sample = []
-            for row_test in range(4, 15):
-                val = str(df.iloc[row_test, c]).replace('.0', '').strip()
-                if val.isdigit() and 7 <= int(val) <= 21: sample.append(int(val))
-            if len(sample) > 2:
+            sample = [str(df.iloc[r, c]) for r in range(4, 12)]
+            if any(s.replace('.0','').isdigit() for s in sample):
                 h_col = c
                 break
         
         if h_col is None: continue
-        m_col = h_col + 1
 
         for row in range(4, len(df)):
-            subject = clean_text(df.iloc[row, target_col])
-            try:
-                h = int(float(str(df.iloc[row, h_col]).replace(',', '.')))
-                m = int(float(str(df.iloc[row, m_col]).replace(',', '.')))
-                if subject and subject != GRUPA:
-                    dt = block["date"].replace(hour=h, minute=m)
-                    events.append({'title': subject, 'start': dt})
-            except: continue
+            raw_subject = str(df.iloc[row, target_col]).strip()
+            # FILTR: Ignoruj puste, "nan" i nazwę grupy
+            if not raw_subject or raw_subject.lower() == "nan" or raw_subject.upper() == GRUPA:
+                continue
 
-    # 1. GENEROWANIE RAPORTU TELEGRAM (CZYTELNY)
+            # Czyścimy nazwę z enterów (tylko pierwsza linia dla przejrzystości)
+            subject = raw_subject.split('\n')[0].strip()
+            
+            try:
+                h = int(float(str(df.iloc[row, h_col]).replace(',','.')))
+                m = int(float(str(df.iloc[row, h_col+1]).replace(',','.')))
+                events.append({'title': subject, 'start': block['date'].replace(hour=h, minute=m)})
+            except:
+                continue
+
+    # 1. RAPORT TELEGRAM (tylko jeśli są wydarzenia)
     if events:
         events.sort(key=lambda x: x['start'])
-        current_state = [f"{e['start'].strftime('%Y-%m-%d %H:%M')} {e['title']}" for e in events]
+        report = "🚨 *OCZYSZCZONY PLAN MECH II*\n"
+        last_date = ""
+        for e in events:
+            d_str = e['start'].strftime("%d.%m")
+            if d_str != last_date:
+                report += f"\n📅 *{d_str}*\n"
+                last_date = d_str
+            report += f"  • {e['start'].strftime('%H:%M')} - {e['title']}\n"
         
-        old_state = []
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r", encoding='utf-8') as f: old_state = json.load(f)
+        send_msg(report)
 
-        if current_state != old_state:
-            report = "🚨 *ZMIANY W PLANIE MECH II*\n"
-            last_date = ""
-            for e in events:
-                date_str = e['start'].strftime("%d.%m ( %A )").replace("Monday","Pn").replace("Tuesday","Wt").replace("Wednesday","Śr").replace("Thursday","Czw").replace("Friday","Pt").replace("Saturday","Sob").replace("Sunday","Ndz")
-                if date_str != last_date:
-                    report += f"\n📅 *{date_str}*\n"
-                    last_date = date_str
-                report += f"  • {e['start'].strftime('%H:%M')} - {e['title']}\n"
-            
-            send_msg(report)
-            with open(STATE_FILE, "w", encoding='utf-8') as f: json.dump(current_state, f)
-
-    # 2. GENEROWANIE ICS (PANCERNY DLA APPLE)
-    stamp = datetime.now().strftime('%Y%m%dT%H%M%SZ')
-    ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//MECHII", "X-WR-CALNAME:Plan MECH II", "METHOD:PUBLISH"]
+    # 2. GENEROWANIE ICS (bez "nan")
+    ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//PL", "X-WR-CALNAME:Plan MECH II", "METHOD:PUBLISH"]
     for e in events:
         uid = hashlib.md5(f"{e['title']}{e['start']}".encode()).hexdigest()
         ics.extend([
             "BEGIN:VEVENT",
             f"UID:{uid}@studia.pl",
-            f"DTSTAMP:{stamp}",
+            f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
             f"DTSTART:{e['start'].strftime('%Y%m%dT%H%M%S')}",
-            f"DTEND:{(e['start'] + timedelta(hours=1, minutes=30)).strftime('%Y%m%dT%H%M%S')}",
+            f"DTEND:{(e['start'] + timedelta(minutes=90)).strftime('%Y%m%dT%H%M%S')}",
             f"SUMMARY:{e['title']}",
             "END:VEVENT"
         ])
     ics.append("END:VCALENDAR")
+    
     with open(ICS_FILE, "w", encoding="utf-8") as f:
         f.write("\r\n".join(ics))
 
