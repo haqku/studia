@@ -24,11 +24,14 @@ def send_msg(text):
 
 def parse_date(date_str):
     if not isinstance(date_str, str): return None
-    match = re.search(r"(\d+)\s+([a-zA-Z]+)\s+(\d{4})", date_str)
+    # Szukamy dnia i miesiąca, rok wymuszamy na 2026
+    match = re.search(r"(\d+)\s+([a-zA-Z]+)", date_str)
     if match:
-        day, month_name, year = int(match.group(1)), match.group(2).lower(), int(match.group(3))
+        day = int(match.group(1))
+        month_name = match.group(2).lower()
         month = PL_MONTHS.get(month_name)
-        if month: return datetime(year, month, day)
+        if month:
+            return datetime(2026, month, day) # WYMUSZAMY 2026
     return None
 
 def clean_val(val):
@@ -36,24 +39,6 @@ def clean_val(val):
         v = str(val).replace('.0', '').replace(',', '.').strip()
         return int(float(v))
     except: return None
-
-def format_report(event_list, emoji):
-    if not event_list: return ""
-    # Sortowanie chronologiczne
-    event_list.sort(key=lambda x: datetime.strptime(x.split(" - ")[0], "%d.%m %H:%M"))
-    
-    report = ""
-    last_date = ""
-    for ev in event_list:
-        date_part, title = ev.split(" - ", 1)
-        day_month, hour = date_part.split(" ")
-        
-        if day_month != last_date:
-            report += f"\n📅 *{day_month}*\n"
-            last_date = day_month
-        
-        report += f"  {emoji} {hour}: {title}\n"
-    return report
 
 def main():
     r = requests.get(URL_STRONY)
@@ -66,20 +51,17 @@ def main():
     df = pd.read_excel("temp.xlsx", header=None)
 
     all_blocks = []
+    # Szukamy dat w pierwszych 3 wierszach
     for col in range(len(df.columns)):
-        for row in range(2):
+        for row in range(3):
             d = parse_date(str(df.iloc[row, col]))
             if d:
                 all_blocks.append({"date": d, "col_start": col})
                 break
 
-    mech_cols = []
-    for r in range(5):
-        for c in range(len(df.columns)):
-            if GRUPA in str(df.iloc[r, c]).upper():
-                mech_cols.append(c)
+    mech_cols = [c for c in range(len(df.columns)) if GRUPA in str(df.iloc[2, c]).upper() or GRUPA in str(df.iloc[3, c]).upper()]
 
-    current_events = []
+    events = []
     for i, block in enumerate(all_blocks):
         start = block["col_start"]
         end = all_blocks[i+1]["col_start"] if i+1 < len(all_blocks) else len(df.columns)
@@ -87,12 +69,13 @@ def main():
         if target_col is None: continue
 
         h_col = None
-        for c in range(start - 5, start + 5):
-            if c < 0 or c >= len(df.columns): continue
-            sample = [clean_val(x) for x in df.iloc[4:15, c] if pd.notna(x)]
-            if any(v is not None and 8 <= v <= 21 for v in sample):
+        for c in range(start - 2, start + 2):
+            if c < 0: continue
+            sample = [clean_val(x) for x in df.iloc[4:10, c] if pd.notna(x)]
+            if any(v is not None and 7 <= v <= 21 for v in sample):
                 h_col = c
                 break
+        
         if h_col is None: continue
         m_col = h_col + 1
 
@@ -104,40 +87,36 @@ def main():
                 if h is not None and m is not None:
                     try:
                         dt = block["date"].replace(hour=h, minute=m)
-                        current_events.append(f"{dt.strftime('%d.%m %H:%M')} - {subject}")
+                        events.append({'title': subject, 'start': dt})
                     except: continue
 
-    # ICS Generation
+    # GENEROWANIE ICS - WERSJA SUPER KOMPATYBILNA
     stamp = datetime.now().strftime('%Y%m%dT%H%M%SZ')
-    ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PlanBot//MECHII//PL", "X-WR-CALNAME:Plan MECH II", "METHOD:PUBLISH"]
-    for e_str in current_events:
-        parts = e_str.split(" - ")
-        dt = datetime.strptime(f"{parts[0]} {datetime.now().year}", "%d.%m %H:%M %Y")
-        uid = hashlib.md5(e_str.encode()).hexdigest()
-        ics.extend(["BEGIN:VEVENT", f"UID:{uid}@studia.bot", f"DTSTAMP:{stamp}", f"DTSTART:{dt.strftime('%Y%m%dT%H%M%S')}", f"DTEND:{(dt + timedelta(minutes=45)).strftime('%Y%m%dT%H%M%S')}", f"SUMMARY:{parts[1]}", "END:VEVENT"])
+    ics = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//PlanBot//MECHII",
+        "X-WR-CALNAME:Plan MECH II",
+        "METHOD:PUBLISH"
+    ]
+    
+    for e in events:
+        uid = hashlib.md5(f"{e['title']}{e['start']}".encode()).hexdigest()
+        ics.extend([
+            "BEGIN:VEVENT",
+            f"UID:{uid}@studia.pl",
+            f"DTSTAMP:{stamp}",
+            f"DTSTART:{e['start'].strftime('%Y%m%dT%H%M%S')}",
+            f"DTEND:{(e['start'] + timedelta(minutes=90)).strftime('%Y%m%dT%H%M%S')}",
+            f"SUMMARY:{e['title']}",
+            "END:VEVENT"
+        ])
     ics.append("END:VCALENDAR")
-    with open(ICS_FILE, "w", encoding="utf-8") as f: f.write("\r\n".join(ics))
+    
+    with open(ICS_FILE, "w", encoding="utf-8") as f:
+        f.write("\r\n".join(ics))
 
-    # Telegram reporting
-    old_events = []
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding='utf-8') as f: old_events = json.load(f)
-
-    added = [e for e in current_events if e not in old_events]
-    removed = [e for e in old_events if e not in current_events]
-
-    if added or removed:
-        msg = "🚨 *ZMIANY W HARMONOGRAMIE MECH II*\n"
-        if added:
-            msg += "\n✅ *NOWE ZAJĘCIA:*" + format_report(added, "🔹")
-        if removed:
-            msg += "\n❌ *USUNIĘTE/STARE:*" + format_report(removed, "🔸")
-        
-        msg += f"\n🔗 [Link do pełnego Excela]({plan_url})"
-        send_msg(msg)
-        
-        with open(STATE_FILE, "w", encoding='utf-8') as f:
-            json.dump(current_events, f, ensure_ascii=False)
+    print(f"Zapisano {len(events)} zajęć do pliku ICS.")
 
 if __name__ == "__main__":
     main()
