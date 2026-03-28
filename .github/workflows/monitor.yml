@@ -3,29 +3,24 @@ on:
   schedule:
     - cron: '0 */1 * * *'
   workflow_dispatch:
-
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4  # Zaktualizowane do v4
-
+      - uses: actions/checkout@v4
       - name: Setup Python
-        uses: actions/setup-python@v5 # Zaktualizowane do v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
-        run: pip install pandas openpyxl requests beautifulsoup4
-
+        run: pip install pandas openpyxl requests beautifulsoup4  # <-- MUSI BYĆ openpyxl
       - name: Run script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python monitor.py
-
       - name: Commit and Push
         run: |
           git config --global user.name 'PlanBot'
